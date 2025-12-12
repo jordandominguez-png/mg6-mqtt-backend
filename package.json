@@ -1,0 +1,14 @@
+{
+  "name": "mg6-mqtt-backend",
+  "version": "1.0.0",
+  "description": "MQTT listener for MG6 devices",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.5.0",
+    "mongodb": "^6.7.0",
+    "dotenv": "^16.4.5"
+  }
+}
