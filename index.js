@@ -3,9 +3,9 @@
  * Runs as a Background Worker on Render
  */
 
-require('dotenv').config();
-const mqtt = require('mqtt');
-const { MongoClient } = require('mongodb');
+require("dotenv").config();
+const mqtt = require("mqtt");
+const { MongoClient } = require("mongodb");
 
 // ================== ENV ==================
 const {
@@ -16,19 +16,19 @@ const {
   MONGODB_URI,
   DB_NAME,
   COLLECTION_NAME,
-  MIN_SAVE_INTERVAL_SEC
+  MIN_SAVE_INTERVAL_SEC,
 } = process.env;
 
 // ================== VALIDATION ==================
 const requiredVars = [
-  'MQTT_URL',
-  'MQTT_USERNAME',
-  'MQTT_PASSWORD',
-  'MQTT_TOPIC',
-  'MONGODB_URI',
-  'DB_NAME',
-  'COLLECTION_NAME',
-  'MIN_SAVE_INTERVAL_SEC'
+  "MQTT_URL",
+  "MQTT_USERNAME",
+  "MQTT_PASSWORD",
+  "MQTT_TOPIC",
+  "MONGODB_URI",
+  "DB_NAME",
+  "COLLECTION_NAME",
+  "MIN_SAVE_INTERVAL_SEC",
 ];
 
 for (const v of requiredVars) {
@@ -38,16 +38,28 @@ for (const v of requiredVars) {
   }
 }
 
+const minIntervalSec = Number(MIN_SAVE_INTERVAL_SEC);
+if (!Number.isFinite(minIntervalSec) || minIntervalSec < 0) {
+  console.error(`❌ MIN_SAVE_INTERVAL_SEC must be a valid number. Got: ${MIN_SAVE_INTERVAL_SEC}`);
+  process.exit(1);
+}
+const minIntervalMs = minIntervalSec * 1000;
+
 // ================== STATE ==================
-let lastSavedAt = 0;
-const minIntervalMs = Number(MIN_SAVE_INTERVAL_SEC) * 1000;
+// Mejor: throttle por topic (o cámbialo por deviceId si lo tienes dentro del payload)
+const lastSavedByKey = new Map(); // key -> timestamp
 
 // ================== MONGODB ==================
-const mongoClient = new MongoClient(MONGODB_URI);
+const mongoClient = new MongoClient(MONGODB_URI, {
+  // Opcional: mejora estabilidad en algunos entornos
+  // maxPoolSize: 10,
+  // serverSelectionTimeoutMS: 10000,
+});
+
 let collection;
 
 async function connectMongo() {
-  console.log('🔌 Connecting to MongoDB...');
+  console.log("🔌 Connecting to MongoDB...");
   await mongoClient.connect();
   const db = mongoClient.db(DB_NAME);
   collection = db.collection(COLLECTION_NAME);
@@ -56,61 +68,112 @@ async function connectMongo() {
 
 // ================== MQTT ==================
 function connectMQTT() {
-  console.log('🔌 Connecting to MQTT...');
+  console.log("🔌 Connecting to MQTT...");
+  console.log(`➡️  MQTT_URL: ${MQTT_URL}`);
+  console.log(`➡️  MQTT_TOPIC: ${MQTT_TOPIC}`);
+  console.log(`➡️  MQTT_USERNAME: ${MQTT_USERNAME}`);
+
+  const isMqtts = MQTT_URL.startsWith("mqtts://");
 
   const client = mqtt.connect(MQTT_URL, {
     username: MQTT_USERNAME,
     password: MQTT_PASSWORD,
     keepalive: 60,
-    reconnectPeriod: 5000
+    reconnectPeriod: 5000,
+    connectTimeout: 30_000,
+
+    // TLS options (para mqtts)
+    ...(isMqtts
+      ? {
+          // Normalmente debe ser true. Si EMQX usa CA válida, déjalo así.
+          // Si te da error de certificado, temporalmente prueba con false para diagnosticar.
+          rejectUnauthorized: true,
+        }
+      : {}),
   });
 
-  client.on('connect', () => {
-    console.log('✅ MQTT connected');
-    client.subscribe(MQTT_TOPIC, () => {
-      console.log(`📡 Subscribed to topic: ${MQTT_TOPIC}`);
+  client.on("connect", () => {
+    console.log("✅ MQTT connected");
+
+    client.subscribe(MQTT_TOPIC, { qos: 0 }, (err, granted) => {
+      if (err) {
+        console.error("❌ Subscribe error:", err.message);
+        return;
+      }
+      console.log("📡 Subscribed:", granted?.map(g => `${g.topic}(qos=${g.qos})`).join(", ") || MQTT_TOPIC);
     });
   });
 
-  client.on('message', async (topic, message) => {
+  client.on("reconnect", () => console.log("♻️ MQTT reconnecting..."));
+  client.on("offline", () => console.log("📴 MQTT offline"));
+  client.on("close", () => console.log("🔌 MQTT connection closed"));
+
+  client.on("message", async (topic, message) => {
+    // Key para throttle: por topic.
+    // Si tu payload trae algo como deviceId/imei/sn, mejor usa eso para no bloquear otros sensores.
+    const throttleKey = topic;
+
     try {
       const now = Date.now();
+      const last = lastSavedByKey.get(throttleKey) || 0;
+      if (now - last < minIntervalMs) return; // throttle
 
-      if (now - lastSavedAt < minIntervalMs) {
-        return; // throttle save
+      // JSON parse seguro
+      const raw = message.toString();
+      let payload;
+      try {
+        payload = JSON.parse(raw);
+      } catch (e) {
+        console.error("❌ Invalid JSON payload. Topic:", topic, "Raw:", raw.slice(0, 300));
+        return;
       }
 
-      lastSavedAt = now;
-
-      const payload = JSON.parse(message.toString());
+      // marca throttle solo cuando ya parseó bien (y antes de guardar)
+      lastSavedByKey.set(throttleKey, now);
 
       const doc = {
         topic,
         payload,
-        receivedAt: new Date()
+        receivedAt: new Date(),
       };
 
       await collection.insertOne(doc);
-
-      console.log('📥 Saved reading:', doc.receivedAt.toISOString());
+      console.log("📥 Saved reading:", doc.receivedAt.toISOString(), "Topic:", topic);
     } catch (err) {
-      console.error('❌ Error processing message:', err.message);
+      console.error("❌ Error processing message:", err?.message || err);
     }
   });
 
-  client.on('error', (err) => {
-    console.error('❌ MQTT error:', err.message);
+  client.on("error", (err) => {
+    // OJO: error NO siempre cierra, pero ayuda para debug
+    console.error("❌ MQTT error:", err.message);
   });
+
+  return client;
 }
+
+// ================== GRACEFUL SHUTDOWN ==================
+async function shutdown(signal) {
+  console.log(`🛑 Received ${signal}. Closing connections...`);
+  try {
+    await mongoClient.close();
+  } catch (e) {
+    console.error("Mongo close error:", e?.message || e);
+  }
+  process.exit(0);
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 // ================== START ==================
 (async () => {
   try {
-    console.log('🚀 Starting MG6 MQTT Backend...');
+    console.log("🚀 Starting MG6 MQTT Backend...");
     await connectMongo();
     connectMQTT();
   } catch (err) {
-    console.error('❌ Fatal error:', err);
+    console.error("❌ Fatal error:", err?.message || err);
     process.exit(1);
   }
 })();
