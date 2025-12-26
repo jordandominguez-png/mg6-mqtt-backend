@@ -40,7 +40,9 @@ for (const v of requiredVars) {
 
 const minIntervalSec = Number(MIN_SAVE_INTERVAL_SEC);
 if (!Number.isFinite(minIntervalSec) || minIntervalSec < 0) {
-  console.error(`❌ MIN_SAVE_INTERVAL_SEC must be a valid number. Got: ${MIN_SAVE_INTERVAL_SEC}`);
+  console.error(
+    `❌ MIN_SAVE_INTERVAL_SEC must be a valid number. Got: ${MIN_SAVE_INTERVAL_SEC}`
+  );
   process.exit(1);
 }
 const minIntervalMs = minIntervalSec * 1000;
@@ -63,7 +65,9 @@ async function connectMongo() {
   await mongoClient.connect();
   const db = mongoClient.db(DB_NAME);
   collection = db.collection(COLLECTION_NAME);
-  console.log(`✅ MongoDB connected → DB: ${DB_NAME}, Collection: ${COLLECTION_NAME}`);
+  console.log(
+    `✅ MongoDB connected → DB: ${DB_NAME}, Collection: ${COLLECTION_NAME}`
+  );
 }
 
 // ================== MQTT ==================
@@ -71,13 +75,20 @@ function connectMQTT() {
   console.log("🔌 Connecting to MQTT...");
   console.log(`➡️  MQTT_URL: ${MQTT_URL}`);
   console.log(`➡️  MQTT_TOPIC: ${MQTT_TOPIC}`);
-  console.log(`➡️  MQTT_USERNAME: ${MQTT_USERNAME}`);
+
+  // Sanitiza credenciales para evitar espacios/saltos de línea de Render
+  const username = (MQTT_USERNAME || "").trim();
+  const password = (MQTT_PASSWORD || "").trim();
+
+  // Logs seguros (no imprimen la password)
+  console.log(`➡️  MQTT_USERNAME: ${JSON.stringify(username)} len=${username.length}`);
+  console.log(`➡️  MQTT_PASSWORD len=${password.length}`);
 
   const isMqtts = MQTT_URL.startsWith("mqtts://");
 
   const client = mqtt.connect(MQTT_URL, {
-    username: MQTT_USERNAME,
-    password: MQTT_PASSWORD,
+    username,
+    password,
     keepalive: 60,
     reconnectPeriod: 5000,
     connectTimeout: 30_000,
@@ -85,8 +96,7 @@ function connectMQTT() {
     // TLS options (para mqtts)
     ...(isMqtts
       ? {
-          // Normalmente debe ser true. Si EMQX usa CA válida, déjalo así.
-          // Si te da error de certificado, temporalmente prueba con false para diagnosticar.
+          // Déjalo en true. Tu error actual NO es TLS, es auth.
           rejectUnauthorized: true,
         }
       : {}),
@@ -100,7 +110,10 @@ function connectMQTT() {
         console.error("❌ Subscribe error:", err.message);
         return;
       }
-      console.log("📡 Subscribed:", granted?.map(g => `${g.topic}(qos=${g.qos})`).join(", ") || MQTT_TOPIC);
+      console.log(
+        "📡 Subscribed:",
+        granted?.map((g) => `${g.topic}(qos=${g.qos})`).join(", ") || MQTT_TOPIC
+      );
     });
   });
 
@@ -124,7 +137,12 @@ function connectMQTT() {
       try {
         payload = JSON.parse(raw);
       } catch (e) {
-        console.error("❌ Invalid JSON payload. Topic:", topic, "Raw:", raw.slice(0, 300));
+        console.error(
+          "❌ Invalid JSON payload. Topic:",
+          topic,
+          "Raw:",
+          raw.slice(0, 300)
+        );
         return;
       }
 
@@ -145,7 +163,6 @@ function connectMQTT() {
   });
 
   client.on("error", (err) => {
-    // OJO: error NO siempre cierra, pero ayuda para debug
     console.error("❌ MQTT error:", err.message);
   });
 
